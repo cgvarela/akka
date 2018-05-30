@@ -1,6 +1,7 @@
 /**
- * Copyright (C) 2009-2014 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.routing
 
 import akka.actor.Actor
@@ -35,12 +36,12 @@ private[akka] object RoutedActorCell {
  * INTERNAL API
  */
 private[akka] class RoutedActorCell(
-  _system: ActorSystemImpl,
-  _ref: InternalActorRef,
-  _routerProps: Props,
+  _system:           ActorSystemImpl,
+  _ref:              InternalActorRef,
+  _routerProps:      Props,
   _routerDispatcher: MessageDispatcher,
-  val routeeProps: Props,
-  _supervisor: InternalActorRef)
+  val routeeProps:   Props,
+  _supervisor:       InternalActorRef)
   extends ActorCell(_system, _ref, _routerProps, _routerDispatcher, _supervisor) {
 
   private[akka] val routerConfig = _routerProps.routerConfig
@@ -106,7 +107,7 @@ private[akka] class RoutedActorCell(
         if (nrOfRoutees > 0)
           addRoutees(Vector.fill(nrOfRoutees)(pool.newRoutee(routeeProps, this)))
       case group: Group ⇒
-        val paths = group.paths
+        val paths = group.paths(system)
         if (paths.nonEmpty)
           addRoutees(paths.map(p ⇒ group.routeeFor(p, this))(collection.breakOut))
       case _ ⇒
@@ -116,7 +117,7 @@ private[akka] class RoutedActorCell(
   }
 
   /**
-   * Called when `router` is initalized but before `super.start()` to
+   * Called when `router` is initialized but before `super.start()` to
    * be able to do extra initialization in subclass.
    */
   protected def preSuperStart(): Unit = ()
@@ -141,7 +142,6 @@ private[akka] class RoutedActorCell(
  * INTERNAL API
  */
 private[akka] class RouterActor extends Actor {
-
   val cell = context match {
     case x: RoutedActorCell ⇒ x
     case _ ⇒
@@ -149,7 +149,8 @@ private[akka] class RouterActor extends Actor {
   }
 
   val routingLogicController: Option[ActorRef] = cell.routerConfig.routingLogicController(
-    cell.router.logic).map(props ⇒ context.actorOf(props.withDispatcher(context.props.dispatcher),
+    cell.router.logic).map(props ⇒ context.actorOf(
+      props.withDispatcher(context.props.dispatcher),
       name = "routingLogicController"))
 
   def receive = {
@@ -159,6 +160,9 @@ private[akka] class RouterActor extends Actor {
       cell.addRoutee(routee)
     case RemoveRoutee(routee) ⇒
       cell.removeRoutee(routee, stopChild = true)
+      stopIfAllRouteesRemoved()
+    case Terminated(child) ⇒
+      cell.removeRoutee(ActorRefRoutee(child), stopChild = false)
       stopIfAllRouteesRemoved()
     case other if routingLogicController.isDefined ⇒
       routingLogicController.foreach(_.forward(other))
@@ -185,9 +189,6 @@ private[akka] class RouterPoolActor(override val supervisorStrategy: SupervisorS
   }
 
   override def receive = ({
-    case Terminated(child) ⇒
-      cell.removeRoutee(ActorRefRoutee(child), stopChild = false)
-      stopIfAllRouteesRemoved()
     case AdjustPoolSize(change: Int) ⇒
       if (change > 0) {
         val newRoutees = Vector.fill(change)(pool.newRoutee(cell.routeeProps, context))

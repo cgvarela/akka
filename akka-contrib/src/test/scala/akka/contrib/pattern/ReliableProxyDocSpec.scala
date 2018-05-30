@@ -1,12 +1,11 @@
 /**
- * Copyright (C) 2009-2014 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.contrib.pattern
 
 import akka.testkit.AkkaSpec
 import akka.actor._
-import akka.testkit.ImplicitSender
 import scala.concurrent.duration._
 import akka.testkit.TestProbe
 

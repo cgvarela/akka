@@ -1,6 +1,7 @@
 /**
- * Copyright (C) 2014 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2014-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
 import akka.testkit.AkkaSpec
@@ -25,7 +26,6 @@ object PropsCreationSpec {
 
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class PropsCreationSpec extends AkkaSpec("akka.actor.serialize-creators = on") {
 
   import akka.actor.PropsCreationSpec._

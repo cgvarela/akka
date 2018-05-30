@@ -1,20 +1,18 @@
 /**
- * Copyright (C) 2009-2014 Typesafe Inc. <http://www.typesafe.com>
- * Copyright (C) 2012-2013 Eligotech BV.
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
+ * Copyright (C) 2012-2016 Eligotech BV.
  */
 
 package akka.persistence.serialization
 
 import java.io._
 import akka.actor._
-import akka.serialization.{ Serializer, SerializationExtension }
-import akka.serialization.Serialization
-import scala.util.Success
-import scala.util.Failure
+import akka.serialization._
+import akka.util.ByteString.UTF_8
 
 /**
  * Wrapper for snapshot `data`. Snapshot `data` are the actual snapshot objects captured by
- * a [[Processor]].
+ * the persistent actor.
  *
  * @see [[SnapshotSerializer]]
  */
@@ -22,17 +20,13 @@ import scala.util.Failure
 final case class Snapshot(data: Any)
 
 /**
- * INTERNAL API.
- */
-@SerialVersionUID(1L)
-private[serialization] final case class SnapshotHeader(serializerId: Int, manifest: Option[String])
-
-/**
  * [[Snapshot]] serializer.
  */
-class SnapshotSerializer(system: ExtendedActorSystem) extends Serializer {
-  def identifier: Int = 8
-  def includeManifest: Boolean = false
+class SnapshotSerializer(val system: ExtendedActorSystem) extends BaseSerializer {
+
+  override val includeManifest: Boolean = false
+
+  private lazy val serialization = SerializationExtension(system)
 
   private lazy val transportInformation: Option[Serialization.Information] = {
     val address = system.provider.getDefaultAddress
@@ -56,17 +50,39 @@ class SnapshotSerializer(system: ExtendedActorSystem) extends Serializer {
   def fromBinary(bytes: Array[Byte], manifest: Option[Class[_]]): AnyRef =
     Snapshot(snapshotFromBinary(bytes))
 
+  private def headerToBinary(snapshot: AnyRef, snapshotSerializer: Serializer): Array[Byte] = {
+    val out = new ByteArrayOutputStream
+    writeInt(out, snapshotSerializer.identifier)
+
+    val ms = Serializers.manifestFor(snapshotSerializer, snapshot)
+    if (ms.nonEmpty) out.write(ms.getBytes(UTF_8))
+
+    out.toByteArray
+  }
+
+  private def headerFromBinary(bytes: Array[Byte]): (Int, String) = {
+    val in = new ByteArrayInputStream(bytes)
+    val serializerId = readInt(in)
+
+    if ((serializerId & 0xEDAC) == 0xEDAC) // Java Serialization magic value
+      throw new NotSerializableException(s"Replaying snapshot from akka 2.3.x version is not supported any more")
+
+    val remaining = in.available
+    val manifest =
+      if (remaining == 0) ""
+      else {
+        val manifestBytes = new Array[Byte](remaining)
+        in.read(manifestBytes)
+        new String(manifestBytes, UTF_8)
+      }
+    (serializerId, manifest)
+  }
+
   private def snapshotToBinary(snapshot: AnyRef): Array[Byte] = {
     def serialize() = {
-      val extension = SerializationExtension(system)
+      val snapshotSerializer = serialization.findSerializerFor(snapshot)
 
-      val snapshotSerializer = extension.findSerializerFor(snapshot)
-
-      val headerOut = new ByteArrayOutputStream
-      writeInt(headerOut, snapshotSerializer.identifier)
-      if (snapshotSerializer.includeManifest)
-        headerOut.write(snapshot.getClass.getName.getBytes("utf-8"))
-      val headerBytes = headerOut.toByteArray
+      val headerBytes = headerToBinary(snapshot, snapshotSerializer)
 
       val out = new ByteArrayOutputStream
 
@@ -77,47 +93,40 @@ class SnapshotSerializer(system: ExtendedActorSystem) extends Serializer {
       out.toByteArray
     }
 
-    // serialize actor references with full address information (defaultAddress)
-    transportInformation match {
-      case Some(ti) ⇒ Serialization.currentTransportInformation.withValue(ti) { serialize() }
-      case None     ⇒ serialize()
-    }
+    val oldInfo = Serialization.currentTransportInformation.value
+    try {
+      if (oldInfo eq null)
+        Serialization.currentTransportInformation.value = system.provider.serializationInformation
+      serialize()
+    } finally Serialization.currentTransportInformation.value = oldInfo
   }
 
   private def snapshotFromBinary(bytes: Array[Byte]): AnyRef = {
-    val extension = SerializationExtension(system)
-
     val headerLength = readInt(new ByteArrayInputStream(bytes))
     val headerBytes = bytes.slice(4, headerLength + 4)
     val snapshotBytes = bytes.drop(headerLength + 4)
 
-    // If we are allowed to break serialization compatibility of stored snapshots in 2.4
-    // we can remove this attempt of deserialize SnapshotHeader with JavaSerializer.
-    // Then the class SnapshotHeader can be removed. See isseue #16009
-    val header = extension.deserialize(headerBytes, classOf[SnapshotHeader]) match {
-      case Success(header) ⇒
-        header
-      case Failure(_) ⇒
-        val headerIn = new ByteArrayInputStream(headerBytes)
-        val serializerId = readInt(headerIn)
-        val remaining = headerIn.available
-        val manifest =
-          if (remaining == 0) None
-          else {
-            val manifestBytes = Array.ofDim[Byte](remaining)
-            headerIn.read(manifestBytes)
-            Some(new String(manifestBytes, "utf-8"))
-          }
-        SnapshotHeader(serializerId, manifest)
-    }
-    val manifest = header.manifest.map(system.dynamicAccess.getClassFor[AnyRef](_).get)
+    val (serializerId, manifest) = headerFromBinary(headerBytes)
 
-    extension.deserialize[AnyRef](snapshotBytes, header.serializerId, manifest).get
+    serialization.deserialize(snapshotBytes, serializerId, manifest).get
   }
 
-  private def writeInt(outputStream: OutputStream, i: Int) =
-    0 to 24 by 8 foreach { shift ⇒ outputStream.write(i >> shift) }
+  private def writeInt(out: OutputStream, i: Int): Unit = {
+    out.write(i >>> 0)
+    out.write(i >>> 8)
+    out.write(i >>> 16)
+    out.write(i >>> 24)
+  }
 
-  private def readInt(inputStream: InputStream) =
-    (0 to 24 by 8).foldLeft(0) { (id, shift) ⇒ (id | (inputStream.read() << shift)) }
+  private def readInt(in: InputStream): Int = {
+    val b1 = in.read
+    val b2 = in.read
+    val b3 = in.read
+    val b4 = in.read
+
+    if ((b1 | b2 | b3 | b3) == -1) throw new EOFException
+
+    (b4 << 24) | (b3 << 16) | (b2 << 8) | b1
+  }
+
 }

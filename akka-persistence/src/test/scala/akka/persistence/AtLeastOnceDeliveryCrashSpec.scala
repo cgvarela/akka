@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.persistence
 
 import akka.actor._
@@ -12,7 +16,7 @@ object AtLeastOnceDeliveryCrashSpec {
   class StoppingStrategySupervisor(testProbe: ActorRef) extends Actor {
     import scala.concurrent.duration._
 
-    override val supervisorStrategy = OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 10 seconds) {
+    override val supervisorStrategy = OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 10.seconds) {
       case _: IllegalStateException ⇒ Stop
       case t                        ⇒ super.supervisorStrategy.decider.applyOrElse(t, (_: Any) ⇒ Escalate)
     }
@@ -32,6 +36,8 @@ object AtLeastOnceDeliveryCrashSpec {
     with AtLeastOnceDelivery with ActorLogging {
     import CrashingActor._
 
+    override def persistenceId = self.path.name
+
     override def receiveRecover: Receive = {
       case Message ⇒ send()
       case CrashMessage ⇒
@@ -46,7 +52,7 @@ object AtLeastOnceDeliveryCrashSpec {
     }
 
     def send() = {
-      deliver(testProbe.path, { id ⇒ SendingMessage(id, false) })
+      deliver(testProbe.path) { id ⇒ SendingMessage(id, false) }
     }
   }
 
@@ -68,9 +74,9 @@ class AtLeastOnceDeliveryCrashSpec extends AkkaSpec(PersistenceSpec.config("inme
       system.stop(superVisor)
       deathProbe.expectTerminated(superVisor)
 
-      testProbe.expectNoMsg(250 millis)
+      testProbe.expectNoMsg(250.millis)
       createCrashActorUnderSupervisor()
-      testProbe.expectNoMsg(1 second)
+      testProbe.expectNoMsg(1.second)
     }
   }
 }
